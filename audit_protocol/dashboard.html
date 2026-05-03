@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>AI Audit Protocol — Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
+<style>
+:root {
+  --bg:        #080c10;
+  --surface:   #0d1117;
+  --border:    #1e2a38;
+  --accent:    #00e5ff;
+  --accent2:   #ff6b35;
+  --accent3:   #7fff6b;
+  --text:      #c9d8e8;
+  --muted:     #4a6077;
+  --mono:      'IBM Plex Mono', monospace;
+  --sans:      'IBM Plex Sans', sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ── фоновая сетка ── */
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  background-image:
+    linear-gradient(rgba(0,229,255,.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,229,255,.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ── топ-бар ── */
+header {
+  position: sticky; top: 0; z-index: 100;
+  background: rgba(8,12,16,.92);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  padding: 0 28px;
+  height: 56px;
+  display: flex; align-items: center; gap: 20px;
+}
+.logo {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: .08em;
+  color: var(--accent);
+  text-transform: uppercase;
+}
+.logo span { color: var(--muted); }
+
+.services { display: flex; gap: 10px; margin-left: auto; }
+.svc-pill {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  cursor: pointer; transition: all .2s;
+}
+.svc-pill:hover { border-color: var(--accent); color: var(--accent); }
+.svc-pill .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--muted);
+  transition: background .3s;
+}
+.svc-pill.ok .dot { background: var(--accent3); }
+.svc-pill.err .dot { background: var(--accent2); }
+
+.refresh-btn {
+  margin-left: 12px;
+  padding: 5px 14px;
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  font-family: var(--mono); font-size: 11px;
+  color: var(--accent); cursor: pointer;
+  transition: all .2s;
+  letter-spacing: .06em;
+}
+.refresh-btn:hover { background: var(--accent); color: var(--bg); }
+.refresh-btn.spinning { opacity: .6; pointer-events: none; }
+
+/* ── layout ── */
+main {
+  position: relative; z-index: 1;
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 28px 28px 60px;
+}
+
+/* ── метрики верхнего ряда ── */
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.metric {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 20px 22px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color .2s;
+}
+.metric:hover { border-color: var(--accent); }
+.metric::after {
+  content: '';
+  position: absolute; bottom: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--accent), transparent);
+  opacity: 0;
+  transition: opacity .2s;
+}
+.metric:hover::after { opacity: 1; }
+.metric-label {
+  font-family: var(--mono); font-size: 10px;
+  letter-spacing: .12em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 10px;
+}
+.metric-value {
+  font-family: var(--mono); font-size: 32px;
+  font-weight: 600; color: var(--accent);
+  line-height: 1;
+}
+.metric-sub {
+  font-size: 11px; color: var(--muted);
+  margin-top: 6px;
+}
+
+/* ── двухколоночный грид ── */
+.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+/* ── панели ── */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.panel-head {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.panel-title {
+  font-family: var(--mono); font-size: 11px;
+  letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted);
+}
+.panel-body { padding: 20px; }
+
+/* ── домены бар-чарт ── */
+.domain-bars { display: flex; flex-direction: column; gap: 14px; }
+.domain-row { display: flex; flex-direction: column; gap: 5px; }
+.domain-meta {
+  display: flex; justify-content: space-between;
+  font-family: var(--mono); font-size: 11px;
+}
+.domain-name { color: var(--text); }
+.domain-vals { color: var(--muted); }
+.bar-track {
+  height: 6px; background: var(--border); border-radius: 3px; overflow: hidden;
+}
+.bar-fill {
+  height: 100%; border-radius: 3px;
+  transition: width .8s cubic-bezier(.4,0,.2,1);
+}
+
+/* ── confidence ring ── */
+.conf-ring-wrap {
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 12px;
+  min-height: 180px;
+}
+.conf-ring {
+  position: relative; width: 140px; height: 140px;
+}
+.conf-ring svg { transform: rotate(-90deg); }
+.conf-ring-center {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+}
+.conf-ring-pct {
+  font-family: var(--mono); font-size: 28px; font-weight: 600;
+  color: var(--accent);
+}
+.conf-ring-label {
+  font-size: 10px; color: var(--muted);
+  letter-spacing: .1em; text-transform: uppercase;
+}
+.conf-legend {
+  display: flex; gap: 16px;
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+}
+.conf-legend-item { display: flex; align-items: center; gap: 6px; }
+.conf-legend-dot { width: 8px; height: 8px; border-radius: 50%; }
+
+/* ── таблица логов ── */
+.log-wrap { margin-bottom: 0; }
+.log-controls {
+  display: flex; gap: 10px; align-items: center;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.filter-select {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 5px 10px;
+  font-family: var(--mono); font-size: 11px; color: var(--text);
+  cursor: pointer;
+}
+.filter-select:focus { outline: none; border-color: var(--accent); }
+.log-count {
+  margin-left: auto;
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+}
+
+table {
+  width: 100%; border-collapse: collapse;
+  font-family: var(--mono); font-size: 12px;
+}
+th {
+  text-align: left; padding: 10px 16px;
+  color: var(--muted); font-size: 10px;
+  letter-spacing: .1em; text-transform: uppercase;
+  border-bottom: 1px solid var(--border);
+  font-weight: 500;
+}
+td {
+  padding: 11px 16px;
+  border-bottom: 1px solid rgba(30,42,56,.6);
+  vertical-align: middle;
+  color: var(--text);
+}
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: rgba(0,229,255,.03); }
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px; border-radius: 3px;
+  font-size: 10px; font-weight: 500;
+  letter-spacing: .06em; text-transform: uppercase;
+}
+.badge-direct   { background: rgba(0,229,255,.12); color: var(--accent); }
+.badge-consensus{ background: rgba(255,107,53,.12); color: var(--accent2); }
+.badge-domain   { background: rgba(127,255,107,.08); color: var(--accent3); border: 1px solid rgba(127,255,107,.2); }
+
+.conf-bar {
+  display: flex; align-items: center; gap: 8px;
+}
+.conf-bar-track {
+  flex: 1; height: 4px; background: var(--border);
+  border-radius: 2px; overflow: hidden; min-width: 60px;
+}
+.conf-bar-fill {
+  height: 100%; border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--accent3));
+}
+.conf-bar-val { min-width: 34px; text-align: right; color: var(--accent); }
+
+.q-cell {
+  max-width: 280px;
+  white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ts-cell { color: var(--muted); font-size: 11px; white-space: nowrap; }
+
+/* ── пустое состояние ── */
+.empty {
+  text-align: center; padding: 48px 20px;
+  font-family: var(--mono); color: var(--muted); font-size: 12px;
+}
+
+/* ── скроллбар ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+/* ── анимации появления ── */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.metric  { animation: fadeUp .4s both; }
+.metric:nth-child(1) { animation-delay: .05s; }
+.metric:nth-child(2) { animation-delay: .10s; }
+.metric:nth-child(3) { animation-delay: .15s; }
+.metric:nth-child(4) { animation-delay: .20s; }
+.panel   { animation: fadeUp .4s .25s both; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">AI Audit <span>//</span> Protocol</div>
+
+  <div class="services">
+    <div class="svc-pill" id="svc-8000" onclick="checkHealth(8000, this)">
+      <div class="dot"></div>main_agent :8000
+    </div>
+    <div class="svc-pill" id="svc-8001" onclick="checkHealth(8001, this)">
+      <div class="dot"></div>validator :8001
+    </div>
+    <div class="svc-pill" id="svc-8002" onclick="checkHealth(8002, this)">
+      <div class="dot"></div>consensus :8002
+    </div>
+  </div>
+
+  <button class="refresh-btn" id="refresh-btn" onclick="loadAll()">↻ Refresh</button>
+</header>
+
+<main>
+
+  <!-- метрики -->
+  <div class="metrics">
+    <div class="metric">
+      <div class="metric-label">Всего кейсов</div>
+      <div class="metric-value" id="m-total">—</div>
+      <div class="metric-sub">с момента запуска</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Через консенсус</div>
+      <div class="metric-value" id="m-validated" style="color: var(--accent2)">—</div>
+      <div class="metric-sub" id="m-validated-pct">— % от всех</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Прямых ответов</div>
+      <div class="metric-value" id="m-direct" style="color: var(--accent3)">—</div>
+      <div class="metric-sub" id="m-direct-pct">— % от всех</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Avg Confidence</div>
+      <div class="metric-value" id="m-conf">—</div>
+      <div class="metric-sub">финальный ответ</div>
+    </div>
+  </div>
+
+  <!-- домены + confidence кольцо -->
+  <div class="grid-2">
+
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title">Распределение по доменам</div>
+      </div>
+      <div class="panel-body">
+        <div class="domain-bars" id="domain-bars">
+          <div class="empty">Загрузка...</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <div class="panel-title">Confidence — прямые vs консенсус</div>
+      </div>
+      <div class="panel-body">
+        <div class="conf-ring-wrap">
+          <div class="conf-ring">
+            <svg width="140" height="140" viewBox="0 0 140 140">
+              <circle cx="70" cy="70" r="56" fill="none"
+                stroke="#1e2a38" stroke-width="12"/>
+              <circle id="ring-validated" cx="70" cy="70" r="56" fill="none"
+                stroke="#ff6b35" stroke-width="12"
+                stroke-dasharray="0 352" stroke-linecap="round"
+                style="transition: stroke-dasharray .9s cubic-bezier(.4,0,.2,1)"/>
+              <circle id="ring-direct" cx="70" cy="70" r="56" fill="none"
+                stroke="#00e5ff" stroke-width="12"
+                stroke-dasharray="0 352" stroke-linecap="round"
+                style="transition: stroke-dasharray .9s cubic-bezier(.4,0,.2,1)"/>
+            </svg>
+            <div class="conf-ring-center">
+              <div class="conf-ring-pct" id="ring-pct">—</div>
+              <div class="conf-ring-label">avg conf</div>
+            </div>
+          </div>
+          <div class="conf-legend">
+            <div class="conf-legend-item">
+              <div class="conf-legend-dot" style="background:var(--accent)"></div>
+              <span id="leg-direct">Direct —</span>
+            </div>
+            <div class="conf-legend-item">
+              <div class="conf-legend-dot" style="background:var(--accent2)"></div>
+              <span id="leg-validated">Consensus —</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- таблица логов -->
+  <div class="panel log-wrap">
+    <div class="log-controls">
+      <div class="panel-title" style="margin:0">Лог кейсов</div>
+      <select class="filter-select" id="filter-domain" onchange="renderTable()">
+        <option value="">Все домены</option>
+        <option value="tech">tech</option>
+        <option value="science">science</option>
+        <option value="medicine">medicine</option>
+        <option value="finance">finance</option>
+        <option value="general">general</option>
+      </select>
+      <select class="filter-select" id="filter-source" onchange="renderTable()">
+        <option value="">Все источники</option>
+        <option value="direct">direct</option>
+        <option value="consensus">consensus</option>
+      </select>
+      <div class="log-count" id="log-count">—</div>
+    </div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Время</th>
+            <th>Вопрос</th>
+            <th>Домен</th>
+            <th>Источник</th>
+            <th>Confidence</th>
+            <th>Валидаторы</th>
+            <th>User</th>
+          </tr>
+        </thead>
+        <tbody id="log-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</main>
+
+<script>
+// ── конфиг ────────────────────────────────────────────────────────────────────
+const API = {
+  main:      'http://localhost:8000',
+  validator: 'http://localhost:8001',
+  consensus: 'http://localhost:8002',
+};
+
+const DOMAIN_COLORS = {
+  tech:     '#00e5ff',
+  science:  '#7fff6b',
+  medicine: '#ff6b35',
+  finance:  '#ffd166',
+  general:  '#9b8fff',
+};
+
+// ── состояние ─────────────────────────────────────────────────────────────────
+let _cases = [];
+let _stats = {};
+
+// ── health checks ─────────────────────────────────────────────────────────────
+async function checkHealth(port, el) {
+  const base = port === 8000 ? API.main
+             : port === 8001 ? API.validator
+             : API.consensus;
+  try {
+    const r = await fetch(`${base}/health`, { signal: AbortSignal.timeout(3000) });
+    if (r.ok) {
+      el.classList.add('ok');
+      el.classList.remove('err');
+    } else throw new Error();
+  } catch {
+    el.classList.add('err');
+    el.classList.remove('ok');
+  }
+}
+
+function checkAllHealth() {
+  checkHealth(8000, document.getElementById('svc-8000'));
+  checkHealth(8001, document.getElementById('svc-8001'));
+  checkHealth(8002, document.getElementById('svc-8002'));
+}
+
+// ── загрузка данных ──────────────────────────────────────────────────────────
+async function loadAll() {
+  const btn = document.getElementById('refresh-btn');
+  btn.classList.add('spinning');
+  btn.textContent = '↻ Loading…';
+
+  try {
+    const [statsRes, casesRes] = await Promise.all([
+      fetch(`${API.main}/log/stats`),
+      fetch(`${API.main}/log?limit=200`),
+    ]);
+    _stats = await statsRes.json();
+    _cases = await casesRes.json();
+    renderMetrics();
+    renderDomains();
+    renderRing();
+    renderTable();
+  } catch(e) {
+    console.warn('Не удалось загрузить данные:', e);
+  }
+
+  checkAllHealth();
+  btn.classList.remove('spinning');
+  btn.textContent = '↻ Refresh';
+}
+
+// ── метрики ──────────────────────────────────────────────────────────────────
+function renderMetrics() {
+  const { total=0, validated=0, direct=0, avg_confidence=0 } = _stats;
+  document.getElementById('m-total').textContent     = total;
+  document.getElementById('m-validated').textContent = validated;
+  document.getElementById('m-direct').textContent    = direct;
+  document.getElementById('m-conf').textContent      = total
+    ? (avg_confidence * 100).toFixed(0) + '%' : '—';
+
+  const vPct = total ? ((validated/total)*100).toFixed(0) : 0;
+  const dPct = total ? ((direct/total)*100).toFixed(0) : 0;
+  document.getElementById('m-validated-pct').textContent = `${vPct}% от всех`;
+  document.getElementById('m-direct-pct').textContent    = `${dPct}% от всех`;
+}
+
+// ── домены ───────────────────────────────────────────────────────────────────
+function renderDomains() {
+  const domains = _stats.by_domain || [];
+  const max = Math.max(...domains.map(d => d.count), 1);
+  const el  = document.getElementById('domain-bars');
+
+  if (!domains.length) {
+    el.innerHTML = '<div class="empty">Нет данных</div>';
+    return;
+  }
+
+  el.innerHTML = domains.map(d => {
+    const pct   = (d.count / max * 100).toFixed(0);
+    const color = DOMAIN_COLORS[d.domain] || '#4a6077';
+    const conf  = (d.avg_confidence * 100).toFixed(0);
+    return `
+      <div class="domain-row">
+        <div class="domain-meta">
+          <span class="domain-name">${d.domain}</span>
+          <span class="domain-vals">${d.count} кейсов · ${conf}% avg conf</span>
+        </div>
+        <div class="bar-track">
+          <div class="bar-fill" style="width:${pct}%;background:${color}"></div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+// ── кольцо confidence ─────────────────────────────────────────────────────────
+function renderRing() {
+  const { total=0, validated=0, direct=0, avg_confidence=0 } = _stats;
+  const C = 2 * Math.PI * 56;   // длина окружности r=56
+
+  // прямые = верхний слой (рисуется поверх)
+  // консенсус = нижний слой
+  const vFrac = total ? validated / total : 0;
+  const dFrac = total ? direct    / total : 0;
+
+  // validated кольцо
+  const vDash = `${(vFrac * C).toFixed(1)} ${C.toFixed(1)}`;
+  // direct кольцо идёт поверх, offset не нужен — они суммируются визуально
+  const dDash = `${(dFrac * C).toFixed(1)} ${C.toFixed(1)}`;
+
+  // смещаем direct чтобы он начинался после validated
+  const vOffset = -(vFrac * C);
+  document.getElementById('ring-validated').setAttribute('stroke-dasharray', vDash);
+  document.getElementById('ring-direct').setAttribute('stroke-dasharray', dDash);
+  document.getElementById('ring-direct').style.strokeDashoffset = vOffset;
+
+  document.getElementById('ring-pct').textContent = total
+    ? (avg_confidence * 100).toFixed(0) + '%' : '—';
+
+  document.getElementById('leg-direct').textContent    = `Direct ${direct}`;
+  document.getElementById('leg-validated').textContent = `Consensus ${validated}`;
+}
+
+// ── таблица ──────────────────────────────────────────────────────────────────
+function renderTable() {
+  const domainF = document.getElementById('filter-domain').value;
+  const sourceF = document.getElementById('filter-source').value;
+
+  const filtered = _cases.filter(c => {
+    if (domainF && c.domain !== domainF) return false;
+    if (sourceF === 'direct'    && c.validated)  return false;
+    if (sourceF === 'consensus' && !c.validated) return false;
+    return true;
+  });
+
+  document.getElementById('log-count').textContent = `${filtered.length} записей`;
+  const tbody = document.getElementById('log-tbody');
+
+  if (!filtered.length) {
+    tbody.innerHTML = '<tr><td colspan="8"><div class="empty">Нет кейсов</div></td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = filtered.map(c => {
+    const ts   = c.created_at
+      ? new Date(c.created_at).toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit',second:'2-digit'})
+      : '—';
+    const conf = Math.round(c.final_confidence * 100);
+    const confColor = conf >= 80 ? 'var(--accent3)'
+                    : conf >= 60 ? 'var(--accent)'
+                    : 'var(--accent2)';
+    const domColor  = DOMAIN_COLORS[c.domain] || '#4a6077';
+    const valList   = (c.validators_used || []).join(', ') || '—';
+
+    return `
+      <tr>
+        <td style="color:var(--muted)">${c.id}</td>
+        <td class="ts-cell">${ts}</td>
+        <td class="q-cell" title="${escHtml(c.question)}">${escHtml(c.question)}</td>
+        <td><span class="badge badge-domain" style="color:${domColor};border-color:${domColor}33">${c.domain}</span></td>
+        <td><span class="badge ${c.validated ? 'badge-consensus' : 'badge-direct'}">
+          ${c.validated ? 'consensus' : 'direct'}
+        </span></td>
+        <td>
+          <div class="conf-bar">
+            <div class="conf-bar-track">
+              <div class="conf-bar-fill" style="width:${conf}%;background:${confColor}"></div>
+            </div>
+            <span class="conf-bar-val" style="color:${confColor}">${conf}%</span>
+          </div>
+        </td>
+        <td style="color:var(--muted);font-size:11px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(valList)}">${c.validators || 0}</td>
+        <td style="color:var(--muted)">${escHtml(c.user_id || '—')}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+
+// ── авто-обновление каждые 15 сек ────────────────────────────────────────────
+loadAll();
+setInterval(loadAll, 15000);
+</script>
+</body>
+</html>

@@ -1,0 +1,64 @@
+services:
+
+  # ── 1. Validator Service ──────────────────────────────────────────────────
+  validator_service:
+    build: .
+    command: uvicorn validator_service.main:app --host 0.0.0.0 --port 8001
+    ports:
+      - "8001:8001"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-YOUR_API_KEY_HERE}
+      - CONSISTENCY_RUNS=${CONSISTENCY_RUNS:-3}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8001/health').raise_for_status()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  # ── 2. Consensus Service ──────────────────────────────────────────────────
+  consensus_service:
+    build: .
+    command: uvicorn consensus_service.main:app --host 0.0.0.0 --port 8002
+    ports:
+      - "8002:8002"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8002/health').raise_for_status()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  # ── 3. Main Agent ─────────────────────────────────────────────────────────
+  main_agent:
+    build: .
+    command: uvicorn main_agent.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-YOUR_API_KEY_HERE}
+      - CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.60}
+      - CONSISTENCY_RUNS=${CONSISTENCY_RUNS:-3}
+      - VALIDATOR_URL=http://validator_service:8001
+      - CONSENSUS_URL=http://consensus_service:8002
+      - AGENT_ID=${AGENT_ID:-main_agent_prod}
+      - DB_PATH=/data/audit_protocol.db
+    volumes:
+      - audit_data:/data
+    depends_on:
+      validator_service:
+        condition: service_healthy
+      consensus_service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  audit_data:
