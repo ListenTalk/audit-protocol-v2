@@ -34,7 +34,7 @@ from db import init_db, CaseStore, SessionStore
 ANTHROPIC_API_KEY    = os.getenv("ANTHROPIC_API_KEY", "YOUR_API_KEY_HERE")
 CLAUDE_MODEL         = "claude-sonnet-4-20250514"
 CONSISTENCY_RUNS     = int(os.getenv("CONSISTENCY_RUNS", "3"))
-CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.77"))
+CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.90"))
 VALIDATOR_URL        = os.getenv("VALIDATOR_URL",  "http://localhost:8001")
 CONSENSUS_URL        = os.getenv("CONSENSUS_URL",  "http://localhost:8002")
 AGENT_ID             = os.getenv("AGENT_ID", f"main_agent_{uuid.uuid4().hex[:6]}")
