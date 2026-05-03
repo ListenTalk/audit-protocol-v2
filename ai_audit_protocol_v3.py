@@ -1,465 +1,248 @@
-"""
-AI Audit Protocol v3 — Claude API (Anthropic)
-===============================================
-Что изменилось vs v2:
-  - mock_generate() заменён на ClaudeEngine (реальный API)
-  - confidence считается через self-consistency:
-      задаём вопрос N раз → доля совпадающих ответов = confidence
-  - ANTHROPIC_API_KEY читается из env (или вставить напрямую)
-  - всё остальное (домены, валидаторы, консенсус, лог) без изменений
-
-Установка:
-    pip install anthropic
-
-Запуск:
-    export ANTHROPIC_API_KEY="sk-ant-..."
-    python ai_audit_protocol_v3.py
-"""
-
 import os
-import json
 import uuid
+import time
+import json
+import asyncio
 import random
 import datetime
 from collections import Counter
 from dataclasses import dataclass, field, asdict
 from typing import Optional
-from enum import Enum
 
 import anthropic
 
+# ─── CONFIG ─────────────────────────────────────
 
-# ─── Конфиг ──────────────────────────────────────────────────────────────────
+API_KEY = os.getenv("ANTHROPIC_API_KEY")
+MODEL   = "claude-sonnet-4-20250514"
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "YOUR_API_KEY_HERE")
-CLAUDE_MODEL      = "claude-sonnet-4-20250514"
-CONSISTENCY_RUNS  = 3      # сколько раз спрашиваем для self-consistency
-MAX_TOKENS        = 512
+CONSISTENCY_RUNS = 3
+MAX_TOKENS = 512
+TIMEOUT = 30
 
+# ─── UTILS ─────────────────────────────────────
 
-# ─── Claude Engine ───────────────────────────────────────────────────────────
+def normalize(text: str) -> str:
+    return text.lower().strip().replace(".", "").replace(",", "")
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+# ─── ENGINE (ASYNC + CACHE + RETRY) ─────────────────────────
 
 class ClaudeEngine:
-    """
-    Реальный вызов Claude API.
 
-    Confidence считается через self-consistency:
-      - задаём вопрос CONSISTENCY_RUNS раз при temperature=1
-      - смотрим долю совпадений с majority-ответом
-      - confidence = совпадений / CONSISTENCY_RUNS
+    def __init__(self, api_key: str):
+        self.client = anthropic.AsyncAnthropic(api_key=api_key)
+        self.cache = {}
 
-    Почему не logprobs:
-      Anthropic API не отдаёт logprobs токенов (в отличие от OpenAI).
-      Self-consistency — следующий лучший метод: он реально измеряет
-      неопределённость модели, а не технический артефакт.
-    """
-
-    def __init__(self, api_key: str = ANTHROPIC_API_KEY):
-        self.client = anthropic.Anthropic(api_key=api_key)
-
-    def generate(
-        self,
-        question: str,
-        context: list[dict] = None,
-        system_prompt: str = None,
-    ) -> tuple[str, float]:
-        """
-        Возвращает (ответ, confidence).
-        context — список {"role": "user"|"assistant", "content": "..."}
-        """
-        messages = self._build_messages(question, context)
-        system   = system_prompt or (
-            "Ты — точный и лаконичный ассистент. "
-            "Отвечай на вопрос кратко и по существу. "
-            "Если не знаешь ответа — честно скажи об этом."
+    async def _call(self, messages, system):
+        return await self.client.messages.create(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            system=system,
+            messages=messages,
         )
 
-        # Собираем CONSISTENCY_RUNS ответов
+    async def safe_call(self, messages, system, retries=3):
+        for i in range(retries):
+            try:
+                return await self._call(messages, system)
+            except Exception:
+                if i == retries - 1:
+                    raise
+                await asyncio.sleep(2 ** i)
+
+    async def generate(self, question, system):
+
+        cache_key = (question, system)
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+
+        messages = [{"role": "user", "content": question}]
         answers = []
-        for _ in range(CONSISTENCY_RUNS):
-            resp = self.client.messages.create(
-                model      = CLAUDE_MODEL,
-                max_tokens = MAX_TOKENS,
-                system     = system,
-                messages   = messages,
-            )
-            answers.append(resp.content[0].text.strip())
 
-        # Основной ответ = самый частый
-        counter     = Counter(answers)
-        best_answer, best_count = counter.most_common(1)[0]
-        confidence  = round(best_count / CONSISTENCY_RUNS, 3)
+        for i in range(CONSISTENCY_RUNS):
+            resp = await self.safe_call(messages, system)
+            text = resp.content[0].text.strip()
+            answers.append(text)
 
-        return best_answer, confidence
+            # 🔥 ранний выход
+            if len(answers) >= 2:
+                counter = Counter(map(normalize, answers))
+                best, count = counter.most_common(1)[0]
+                if count / len(answers) >= 0.9:
+                    result = (answers[-1], round(count / len(answers), 3))
+                    self.cache[cache_key] = result
+                    return result
 
-    def _build_messages(
-        self,
-        question: str,
-        context: list[dict] = None,
-    ) -> list[dict]:
-        """Собирает messages для API из контекста + текущего вопроса."""
-        messages = []
-        if context:
-            for msg in context[-6:]:   # последние 6 сообщений
-                if msg.get("role") in ("user", "assistant"):
-                    messages.append({
-                        "role":    msg["role"],
-                        "content": msg["content"],
-                    })
-        messages.append({"role": "user", "content": question})
-        return messages
+        counter = Counter(map(normalize, answers))
+        best_norm, best_count = counter.most_common(1)[0]
+
+        best_answer = next(a for a in answers if normalize(a) == best_norm)
+        confidence = round(best_count / len(answers), 3)
+
+        result = (best_answer, confidence)
+        self.cache[cache_key] = result
+        return result
 
 
-# ─── Домены знаний ───────────────────────────────────────────────────────────
-
-class Domain(Enum):
-    SCIENCE  = "science"
-    TECH     = "tech"
-    MEDICINE = "medicine"
-    FINANCE  = "finance"
-    GENERAL  = "general"
-
-DOMAIN_KEYWORDS: dict[Domain, list[str]] = {
-    Domain.SCIENCE:  ["физик", "химия", "астро", "квант", "антиматерия",
-                      "тёмная энергия", "темная энергия", "фрактал", "молекул"],
-    Domain.TECH:     ["python", "блокчейн", "нейросет", "ии", "алгоритм",
-                      "программ", "код", "api", "база данных"],
-    Domain.MEDICINE: ["болезн", "лечени", "вирус", "ген", "днк", "мозг", "клетк"],
-    Domain.FINANCE:  ["акци", "инвест", "банк", "криптовалют", "биткоин", "экономик"],
-}
-
-# Системные промпты по доменам — валидаторы получают специализированный контекст
-DOMAIN_SYSTEM_PROMPTS: dict[Domain, str] = {
-    Domain.SCIENCE:  "Ты — эксперт в точных науках: физика, химия, астрономия. Отвечай точно и со ссылкой на научный консенсус.",
-    Domain.TECH:     "Ты — эксперт в технологиях: программирование, ИИ, блокчейн. Давай конкретные технические ответы.",
-    Domain.MEDICINE: "Ты — медицинский эксперт. Отвечай точно, при необходимости рекомендуй консультацию врача.",
-    Domain.FINANCE:  "Ты — финансовый аналитик. Давай точные ответы по экономике и финансам.",
-    Domain.GENERAL:  "Ты — универсальный ассистент. Отвечай честно и по существу.",
-}
-
-
-class DomainClassifier:
-    @staticmethod
-    def classify(text: str) -> Domain:
-        t = text.lower()
-        scores: dict[Domain, int] = {d: 0 for d in Domain}
-        for domain, keywords in DOMAIN_KEYWORDS.items():
-            for kw in keywords:
-                if kw in t:
-                    scores[domain] += 1
-        best = max(scores, key=scores.__getitem__)
-        return best if scores[best] > 0 else Domain.GENERAL
-
-
-# ─── Типы данных ─────────────────────────────────────────────────────────────
-
-class ConsensusStrategy(Enum):
-    MAJORITY_VOTE  = "majority_vote"
-    WEIGHTED_SCORE = "weighted_score"
-    TRUST_RANKING  = "trust_ranking"
-
+# ─── DATA ─────────────────────────────────────
 
 @dataclass
 class AgentResponse:
-    agent_id:       str
-    answer:         str
-    confidence:     float
-    trust_rank:     float = 1.0
-    specialization: list[str] = field(default_factory=list)
-
-
-@dataclass
-class AuditPayload:
-    agent_id:   str
-    user_id:    str
-    timestamp:  str
-    input:      str
-    output:     str
+    agent_id: str
+    answer: str
     confidence: float
-    domain:     str
-    context:    list[dict] = field(default_factory=list)
+    trust: float
 
 
 @dataclass
 class FinalAnswer:
-    answer:          str
-    confidence:      float
-    source:          str
-    domain:          str = Domain.GENERAL.value
-    strategy:        Optional[str] = None
-    validators:      int = 0
-    validators_used: list[str] = field(default_factory=list)
+    answer: str
+    confidence: float
+    source: str
+    validators: int = 0
 
 
-@dataclass
-class CaseLog:
-    payload:      AuditPayload
-    final_answer: FinalAnswer
-    validated:    bool
+# ─── VALIDATORS ─────────────────────────────────
 
-
-# ─── Сеть специализированных валидаторов ─────────────────────────────────────
-
-VALIDATOR_POOL = [
-    {"id": "val_science_1",  "specialization": [Domain.SCIENCE],                          "trust_rank": 0.95},
-    {"id": "val_science_2",  "specialization": [Domain.SCIENCE],                          "trust_rank": 0.88},
-    {"id": "val_tech_1",     "specialization": [Domain.TECH],                             "trust_rank": 0.93},
-    {"id": "val_tech_2",     "specialization": [Domain.TECH],                             "trust_rank": 0.87},
-    {"id": "val_medicine_1", "specialization": [Domain.MEDICINE],                         "trust_rank": 0.91},
-    {"id": "val_finance_1",  "specialization": [Domain.FINANCE],                          "trust_rank": 0.89},
-    {"id": "val_general_1",  "specialization": [Domain.GENERAL],                          "trust_rank": 0.75},
-    {"id": "val_general_2",  "specialization": [Domain.GENERAL],                          "trust_rank": 0.70},
-    {"id": "val_broad_1",    "specialization": [Domain.TECH, Domain.SCIENCE, Domain.FINANCE], "trust_rank": 0.80},
+VALIDATORS = [
+    {"id": "v1", "trust": 0.95},
+    {"id": "v2", "trust": 0.9},
+    {"id": "v3", "trust": 0.85},
+    {"id": "v4", "trust": 0.8},
 ]
 
-
 class ValidatorNet:
-    """
-    Каждый валидатор — отдельный вызов ClaudeEngine
-    со специализированным system_prompt для своего домена.
-    """
 
-    def __init__(self, engine: ClaudeEngine, min_validators: int = 3):
-        self.engine         = engine
-        self.min_validators = min_validators
+    def __init__(self, engine):
+        self.engine = engine
 
-    def query(
-        self,
-        question: str,
-        domain: Domain,
-        context: list[dict] = None,
-    ) -> list[AgentResponse]:
+    async def query(self, question):
 
-        # Выбираем специалистов
-        specialists = [v for v in VALIDATOR_POOL if domain in v["specialization"]]
-        if len(specialists) < self.min_validators:
-            generals = [
-                v for v in VALIDATOR_POOL
-                if Domain.GENERAL in v["specialization"] and v not in specialists
-            ]
-            specialists += generals[: self.min_validators - len(specialists)]
-        selected = specialists[: self.min_validators + 1]
+        tasks = []
 
-        system_prompt = DOMAIN_SYSTEM_PROMPTS.get(domain, DOMAIN_SYSTEM_PROMPTS[Domain.GENERAL])
+        for v in VALIDATORS:
+            persona = f"""
+Ты валидатор {v['id']}.
+Будь критичным. Если не уверен — укажи это.
+"""
+
+            system = "Ты эксперт. Отвечай кратко.\n" + persona
+
+            tasks.append(self.engine.generate(question, system))
+
+        results = await asyncio.gather(*tasks)
 
         responses = []
-        for v in selected:
-            print(f"    [{v['id']}] запрос к Claude...", flush=True)
-            answer, conf = self.engine.generate(question, context, system_prompt)
+        for (answer, conf), v in zip(results, VALIDATORS):
             responses.append(AgentResponse(
-                agent_id       = v["id"],
-                answer         = answer,
-                confidence     = conf,
-                trust_rank     = v["trust_rank"],
-                specialization = [d.value for d in v["specialization"]],
+                agent_id=v["id"],
+                answer=answer,
+                confidence=conf,
+                trust=v["trust"]
             ))
 
         return responses
 
 
-# ─── Консенсус ───────────────────────────────────────────────────────────────
+# ─── CONSENSUS (УЛУЧШЕННЫЙ) ─────────────────────
 
-class ConsensusEngine:
+class Consensus:
 
     @staticmethod
-    def run(
-        responses: list[AgentResponse],
-        strategy: ConsensusStrategy = ConsensusStrategy.WEIGHTED_SCORE,
-    ) -> tuple[str, float]:
+    def run(responses):
 
-        if not responses:
-            return "Консенсус недостижим.", 0.0
+        score_map = {}
+        answers = []
 
-        if strategy == ConsensusStrategy.MAJORITY_VOTE:
-            votes = Counter(r.answer for r in responses)
-            best_answer, cnt = votes.most_common(1)[0]
-            avg_conf = sum(r.confidence for r in responses if r.answer == best_answer) / cnt
+        for r in responses:
+            norm = normalize(r.answer)
+            weight = r.confidence * r.trust
 
-        elif strategy == ConsensusStrategy.WEIGHTED_SCORE:
-            score_map: dict[str, float] = {}
-            for r in responses:
-                w = r.confidence * r.trust_rank
-                score_map[r.answer] = score_map.get(r.answer, 0) + w
-            best_answer = max(score_map, key=score_map.__getitem__)
-            total       = sum(r.confidence * r.trust_rank for r in responses)
-            avg_conf    = score_map[best_answer] / total
+            score_map[norm] = score_map.get(norm, 0) + weight
+            answers.append(norm)
 
-        elif strategy == ConsensusStrategy.TRUST_RANKING:
-            best         = max(responses, key=lambda r: r.trust_rank)
-            best_answer  = best.answer
-            avg_conf     = best.confidence
+        best = max(score_map, key=score_map.get)
 
-        else:
-            best_answer, avg_conf = responses[0].answer, responses[0].confidence
+        # 🔥 штраф за disagreement
+        variance = len(set(answers)) / len(answers)
 
-        return best_answer, round(avg_conf, 3)
+        total = sum(score_map.values())
+        confidence = score_map[best] / total
+
+        confidence *= (1 - variance)
+
+        best_answer = next(r.answer for r in responses if normalize(r.answer) == best)
+
+        return best_answer, round(confidence, 3)
 
 
-# ─── Основной агент ──────────────────────────────────────────────────────────
+# ─── MAIN AGENT ─────────────────────────────────
 
 class MainAgent:
 
-    CONFIDENCE_THRESHOLD = 0.60   # для real API порог чуть выше чем в mock
+    THRESHOLD = 0.65
 
-    def __init__(
-        self,
-        agent_id: str = None,
-        strategy: ConsensusStrategy = ConsensusStrategy.WEIGHTED_SCORE,
-        min_validators: int = 3,
-        api_key: str = ANTHROPIC_API_KEY,
-    ):
-        self.agent_id        = agent_id or f"agent_{uuid.uuid4().hex[:8]}"
-        self.strategy        = strategy
-        self.engine          = ClaudeEngine(api_key)
-        self.validator_net   = ValidatorNet(self.engine, min_validators)
-        self.case_log: list[CaseLog] = []
-        self._session_context: list[dict] = []
+    def __init__(self):
+        self.engine = ClaudeEngine(API_KEY)
+        self.validators = ValidatorNet(self.engine)
 
-    # ── Публичный метод ──────────────────────────────────────────────────────
+    async def ask(self, question):
 
-    def ask(
-        self,
-        question: str,
-        user_id: str = "user_default",
-        extra_context: list[dict] = None,
-    ) -> FinalAnswer:
+        request_id = uuid.uuid4().hex
+        start = time.time()
 
-        context = (extra_context or []) + self._session_context
-        domain  = DomainClassifier.classify(question)
+        print(f"\n[{request_id}] Q: {question}")
 
-        print(f"\n[MainAgent] вопрос: «{question}»")
-        print(f"  domain: {domain.value} | генерирую ответ ({CONSISTENCY_RUNS} прогона)...")
+        system = "Ты точный ассистент."
 
-        raw_answer, confidence = self.engine.generate(question, context)
-        self._session_context.append({"role": "user", "content": question})
+        answer, conf = await self.engine.generate(question, system)
 
-        print(f"  ответ: {raw_answer[:80]}{'...' if len(raw_answer) > 80 else ''}")
-        print(f"  confidence: {confidence:.1%}")
+        print(f"  base confidence: {conf}")
 
-        if confidence >= self.CONFIDENCE_THRESHOLD:
-            final = FinalAnswer(
-                answer     = raw_answer,
-                confidence = confidence,
-                source     = "direct",
-                domain     = domain.value,
-            )
-            self._session_context.append({"role": "assistant", "content": raw_answer})
-            self._log(question, raw_answer, confidence, user_id, context, domain, final, False)
-            return final
+        if conf >= self.THRESHOLD:
+            return FinalAnswer(answer, conf, "direct")
 
-        # ── Audit Protocol ───────────────────────────────────────────────────
-        print(f"\n  [AuditProtocol] confidence {confidence:.1%} < {self.CONFIDENCE_THRESHOLD:.0%}")
-        print(f"  Маршрутизирую к специалистам по домену «{domain.value}»...")
+        print("  → audit triggered")
 
-        payload = AuditPayload(
-            agent_id   = self.agent_id,
-            user_id    = user_id,
-            timestamp  = datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            input      = question,
-            output     = raw_answer,
-            confidence = confidence,
-            domain     = domain.value,
-            context    = context[-6:],
-        )
+        responses = await self.validators.query(question)
 
-        validator_responses = self.validator_net.query(question, domain, context)
-        used_ids = [r.agent_id for r in validator_responses]
+        final_answer, final_conf = Consensus.run(responses)
 
-        consensus_answer, consensus_conf = ConsensusEngine.run(
-            validator_responses, strategy=self.strategy
-        )
+        latency = time.time() - start
 
-        print(f"  [Консенсус] confidence: {consensus_conf:.1%} | стратегия: {self.strategy.value}")
+        print(f"  final confidence: {final_conf} | latency: {latency:.2f}s")
 
-        final = FinalAnswer(
-            answer          = consensus_answer,
-            confidence      = consensus_conf,
-            source          = "AI Protocol Consensus",
-            domain          = domain.value,
-            strategy        = self.strategy.value,
-            validators      = len(validator_responses),
-            validators_used = used_ids,
-        )
-
-        self._session_context.append({"role": "assistant", "content": consensus_answer})
-        self._log(question, raw_answer, confidence, user_id, context, domain, final, True, payload)
-        return final
-
-    def reset_context(self):
-        self._session_context = []
-
-    # ── Лог ──────────────────────────────────────────────────────────────────
-
-    def _log(self, question, raw_answer, confidence, user_id,
-             context, domain, final, validated, payload=None):
-        if payload is None:
-            payload = AuditPayload(
-                agent_id   = self.agent_id,
-                user_id    = user_id,
-                timestamp  = datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                input      = question,
-                output     = raw_answer,
-                confidence = confidence,
-                domain     = domain.value,
-                context    = context[-6:],
-            )
-        self.case_log.append(CaseLog(
-            payload      = payload,
-            final_answer = final,
-            validated    = validated,
-        ))
-
-    def export_log(self) -> str:
-        return json.dumps(
-            [asdict(c) for c in self.case_log],
-            ensure_ascii=False, indent=2
+        return FinalAnswer(
+            answer=final_answer,
+            confidence=final_conf,
+            source="consensus",
+            validators=len(responses)
         )
 
 
-# ─── Демо ────────────────────────────────────────────────────────────────────
+# ─── RUN ─────────────────────────────────────
 
-def print_result(result: FinalAnswer):
-    print(f"\n{'─'*60}")
-    print(f"Ответ      : {result.answer[:120]}{'...' if len(result.answer) > 120 else ''}")
-    print(f"Домен      : {result.domain}")
-    print(f"Уверенность: {result.confidence:.1%}")
-    print(f"Источник   : {result.source}", end="")
-    if result.strategy:
-        print(f"  [{result.strategy}, {result.validators} val]", end="")
-    print()
+async def main():
+
+    agent = MainAgent()
+
+    questions = [
+        "Что такое Python?",
+        "Как работает блокчейн?",
+        "Объясни квантовый компьютер"
+    ]
+
+    for q in questions:
+        result = await agent.ask(q)
+
+        print("—" * 50)
+        print("Ответ:", result.answer[:100])
+        print("Confidence:", result.confidence)
+        print("Source:", result.source)
 
 
 if __name__ == "__main__":
-
-    # ── Проверка ключа ───────────────────────────────────────────────────────
-    if ANTHROPIC_API_KEY == "YOUR_API_KEY_HERE":
-        print("⚠️  Вставь API ключ: export ANTHROPIC_API_KEY='sk-ant-...'")
-        print("   Или замени строку ANTHROPIC_API_KEY в начале файла.\n")
-        print("   Для теста без ключа используй ai_audit_protocol_v2.py (mock-версия).")
-        exit(1)
-
-    agent = MainAgent(
-        agent_id       = "main_agent_001",
-        strategy       = ConsensusStrategy.WEIGHTED_SCORE,
-        min_validators = 3,
-    )
-
-    questions = [
-        "Что такое Python и для чего его используют?",
-        "Объясни принцип работы квантового компьютера",
-        "Как работает блокчейн в двух словах?",
-    ]
-
-    print("=" * 60)
-    print(f"AI Audit Protocol v3 | модель: {CLAUDE_MODEL}")
-    print(f"self-consistency runs: {CONSISTENCY_RUNS} | порог: {MainAgent.CONFIDENCE_THRESHOLD:.0%}")
-    print("=" * 60)
-
-    for q in questions:
-        result = agent.ask(q, user_id="demo_user")
-        print_result(result)
-
-    # Экспорт лога
-    print(f"\n{'═'*60}")
-    print("Лог (JSON):")
-    print(agent.export_log())
+    asyncio.run(main())
