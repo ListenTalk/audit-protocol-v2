@@ -1,16 +1,12 @@
-FROM python:3.12-slim
+FROM python:3.12
 
 WORKDIR /app
 
-# зависимости отдельным слоем — кешируются при rebuild
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# копируем ВЕСЬ проект
+COPY . /app
 
-# исходники
-COPY shared_models.py .
-COPY main_agent/       main_agent/
-COPY validator_service/ validator_service/
-COPY consensus_service/ consensus_service/
+# зависимости
+RUN pip install --no-cache-dir anthropic uvicorn fastapi
 
-# CMD переопределяется в docker-compose для каждого сервиса
-CMD ["uvicorn", "main_agent.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# запуск
+CMD ["python", "main_agent/main.py"]
